@@ -286,6 +286,10 @@ pip install -e .
 
 MIT License — Use freely, modify freely.
 
+## Disclaimer
+
+This software is provided **"as is"** without any warranty. See [DISCLAIMER.md](DISCLAIMER.md) for full terms.
+
 ---
 
 🛡️ **This is the Community Edition. Simple and effective.**
