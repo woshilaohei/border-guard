@@ -4,7 +4,7 @@ VSOS Guard · 社区简约版
 
 设计者：老黑（大成）
 架构师：小黑
-版本：0.4.0
+版本：0.4.1
 
 v0.4.0 变更（基于1000用例压力测试233漏拦+8不匹配修复）：
 - 归一化引擎全面升级：处理全角/制表符/换行/标点/特殊符号/双空格/英文逐字母空格/下划线
@@ -139,6 +139,40 @@ def normalize_text(text: str) -> str:
     if letter_buffer:
         result_parts.append(letter_buffer)
     text = ' '.join(result_parts)
+    # 8.3 下划线切割碎片合并：ig nore → ignore, pre vious → previous
+    FRAGMENT_MERGES = {
+        "ig nore": "ignore", "pre vious": "previous", "instruc tions": "instructions",
+        "restric tions": "restrictions", "constr aints": "constraints",
+        "dis regard": "disregard", "by pass": "bypass", "in ject": "inject",
+        "over ride": "override", "de stroy": "destroy", "dis able": "disable",
+        "re move": "remove", "for get": "forget", "ad min": "admin",
+        "in struc tions": "instructions", "ad minis tra tor": "administrator",
+    }
+    for fragment, merged in FRAGMENT_MERGES.items():
+        text = text.replace(fragment, merged)
+    # 8.5 全空格逐字母场景兜底：如果合并后是一整坨英文，尝试按关键词拆分
+    # 例如 "i g n o r e a l l p r e v i o u s i n s t r u c t i o n s" → "ignoreallpreviousinstructions"
+    # 需要还原为 "ignore all previous instructions"
+    CRITICAL_WORDS = [
+        "ignore", "all", "previous", "prior", "instructions", "rules",
+        "disregard", "forget", "jailbreak", "bypass", "escape",
+        "restrictions", "constraints", "safety", "filters", "limits",
+        "disable", "remove", "admin", "administrator", "root",
+        "sudo", "system", "delete", "destroy", "format", "drop",
+        "inject", "injection", "prompt", "override", "break",
+        # 下划线切割碎片词（ig_nore → ig nore，需要合并回 ignore）
+        "ig nore", "pre vious", "instruc tions", "restric tions",
+        "constr aints", "dis regard", "by pass", "in ject",
+        "over ride", "de stroy", "dis able", "re move",
+    ]
+    if ' ' not in text and len(text) > 10 and text.isalpha():
+        # 纯英文长字符串，尝试按关键词拆分
+        rebuilt = text
+        for word in sorted(CRITICAL_WORDS, key=len, reverse=True):
+            rebuilt = rebuilt.replace(word, f' {word} ')
+        rebuilt = re.sub(r' {2,}', ' ', rebuilt).strip()
+        if ' ' in rebuilt:  # 成功拆分出关键词
+            text = rebuilt
     # 9. 中文之间去空格
     text = re.sub(r'([\u4e00-\u9fff])\s+([\u4e00-\u9fff])', r'\1\2', text)
     # 重复归一化
@@ -230,6 +264,7 @@ HARD_ATTACK_RULES = [
         "escape constraints", "escape all constraints",
         "bypass安全限制",
         "remove all safety constraints",
+        "do anything now", "dan mode",
     ],
      "reason": "越狱尝试：试图突破安全限制",
      "domain": Domain.JAILBREAK_INJECTION,
@@ -353,6 +388,13 @@ GRAY_AREA_RULES = [
      "reason": "疑似提权+破坏：用sudo执行危险操作",
      "domain": Domain.PRIVILEGE_ESCALATION,
      "suggestion": "使用sudo执行删除/格式化操作需谨慎。请确认操作目标正确。"},
+    # 混合语言绕过：中英混搭试图规避检测
+    {"keywords": ["ignore previous", "ignore all", "ignore prior",
+                  "disregard all", "disregard previous", "forget all",
+                  "bypass safety", "bypass restrictions", "disable safety"],
+     "reason": "疑似指令注入：包含英文指令覆盖性表述",
+     "domain": Domain.MALICIOUS_INPUT,
+     "suggestion": "如果这是正常编程需求，请使用白名单配置。如果是重置对话，请直接开新对话。"},
 ]
 
 # 组合攻击规则（标准+严格模式拦截）
@@ -363,9 +405,16 @@ COMBO_ATTACK_RULES = [
     ],
      "reason": "组合攻击：越狱+提权",
      "suggestion": "同时尝试越狱和提权是高危攻击行为。"},
+    # 中英混合绕过：中文"忽略/忘记" + 英文指令关键词
+    {"sets": [
+        ["忽略", "忘记", "绕过", "突破"],
+        ["previous", "prior", "all previous", "all rules", "instructions", "rules"],
+    ],
+     "reason": "组合攻击：中英混合指令注入",
+     "suggestion": "混合语言绕过安全检测是典型的攻击手法。请直接说明你的需求。"},
     {"sets": [
         ["注入", "inject", "忽略规则", "忽略之前的", "ignore rules", "ignore previous",
-         "忽略所有规则", "注入攻击"],
+         "忽略所有规则", "注入攻击", "忽略"],
         ["导出", "下载", "export", "download", "外泄", "credentials", "everything"],
     ],
      "reason": "组合攻击：注入+数据外泄",
