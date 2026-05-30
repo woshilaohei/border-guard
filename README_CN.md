@@ -286,6 +286,10 @@ pip install -e .
 
 MIT License — 随便用，随便改。
 
+## 免责声明
+
+本软件**按原样提供**，不作任何担保。完整条款见 [DISCLAIMER.md](DISCLAIMER.md)。
+
 ---
 
 🛡️ **这是社区简约版，简单又好用。**
