@@ -35,12 +35,17 @@ import codecs
 import logging
 import json
 from dataclasses import dataclass, field
+from functools import lru_cache
 from enum import Enum
 from typing import Optional, Callable, List
 from datetime import datetime
 
-# v0.6.0: 行为监控模块
-from vsos_guard.behavior import BehaviorMonitor, BehaviorSession
+# v0.6.0: 行为监控模块（可选依赖）
+try:
+    from vsos_guard.behavior import BehaviorMonitor, BehaviorSession
+except ImportError:
+    BehaviorMonitor = None
+    BehaviorSession = None
 
 
 # ============================================================
@@ -169,6 +174,9 @@ class GuardLogger:
         self._behavior_monitor = None
 
     def log_check(self, input_text: str, result: CheckResult):
+        # v0.6.1: Ensure input_text is string
+        if not isinstance(input_text, str):
+            input_text = str(input_text) if input_text is not None else ""
         entry = {
             "timestamp": datetime.now().isoformat(),
             "input_preview": input_text[:100] + ("..." if len(input_text) > 100 else ""),
@@ -220,6 +228,7 @@ class GuardLogger:
 # 文本归一化（防绕过）· v0.5.0 扩展
 # ============================================================
 
+@lru_cache(maxsize=256)
 def normalize_text(text: str) -> str:
     """
     归一化文本，去除各种绕过手法：
@@ -476,10 +485,28 @@ class EncodingDetector:
         hex_pattern = re.findall(r'\\x([0-9a-fA-F]{2})', text)
         if hex_pattern:
             try:
-                decoded = bytes(int(h, 16) for h in hex_pattern).decode('utf-8', errors='ignore').lower()
+                decoded = bytes([int(h, 16) for h in hex_pattern]).decode('utf-8', errors='ignore').lower()
                 for kw in cls.CRITICAL_KEYWORDS:
                     if kw in decoded:
                         findings.append(f"hex_escape->{kw}")
+            except Exception:
+                pass
+        return findings
+
+    @classmethod
+    def detect_hex_string(cls, text: str) -> list:
+        """Detect pure hex-encoded strings (e.g. '6869676e6f7265...' = 'ignore...').
+        Unlike detect_hex_escape which looks for \\xHH patterns, this catches raw hex."""
+        findings = []
+        stripped = text.strip()
+        # Must be all hex chars, even length, and long enough to encode a word
+        if len(stripped) >= 16 and len(stripped) % 2 == 0 and re.fullmatch(r'[0-9a-fA-F]+', stripped):
+            try:
+                decoded = bytes.fromhex(stripped).decode('utf-8', errors='ignore').lower()
+                if decoded and len(decoded) >= 3:
+                    for kw in cls.CRITICAL_KEYWORDS:
+                        if kw in decoded:
+                            findings.append(f"hex_string->{kw}")
             except Exception:
                 pass
         return findings
@@ -574,17 +601,43 @@ class EncodingDetector:
 
     @classmethod
     def detect_crlf(cls, text: str) -> list:
-        """Detect CRLF injection sequences that can inject fake HTTP headers."""
+        """Detect CRLF injection sequences that can inject fake HTTP headers.
+        v0.6.1: Improved with known HTTP header list and safe context detection."""
         findings = []
+        
+        # Known HTTP headers that are commonly injected in attacks
+        HTTP_HEADERS = {
+            'Content-Type', 'Content-Length', 'Location', 'Set-Cookie',
+            'Authorization', 'Cookie', 'X-Forwarded-For', 'X-Real-IP',
+            'Host', 'Origin', 'Referer', 'User-Agent', 'Accept',
+            'Cache-Control', 'Pragma', 'WWW-Authenticate', 'Proxy-Authorize',
+            'Refresh', 'Status', 'X-Frame-Options', 'Content-Security-Policy',
+            'Access-Control-Allow-Origin', 'Strict-Transport-Security',
+        }
+        
+        # Known safe contexts (email replies, etc.)
+        SAFE_HEADER_CONTEXTS = {
+            'From:', 'To:', 'Subject:', 'Date:', 'CC:', 'BCC:',
+            'Reply-To:', 'Message-ID:', 'In-Reply-To:',
+        }
+        
         # Literal \r\n in the string
         if '\r\n' in text:
-            # Check what follows the CRLF
             parts = text.split('\r\n')
             for part in parts[1:]:
                 part_stripped = part.strip()
-                if re.match(r'[A-Z][a-zA-Z-]*:', part_stripped):
-                    header_name = part_stripped.split(':')[0]
-                    findings.append(f"crlf_header->{header_name}")
+                header_match = re.match(r'([A-Z][a-zA-Z-]*):', part_stripped)
+                if header_match:
+                    header_name = header_match.group(1)
+                    # v0.6.1: Check if it's a known safe context (email)
+                    if header_name + ':' in SAFE_HEADER_CONTEXTS:
+                        continue  # Skip email headers
+                    # Check if it's a known HTTP header (high confidence)
+                    if header_name in HTTP_HEADERS:
+                        findings.append(f"crlf_header->{header_name}")
+                    else:
+                        # Unknown header after CRLF - still suspicious but lower confidence
+                        findings.append(f"crlf_injection")
                 elif part_stripped:
                     findings.append(f"crlf_injection")
 
@@ -601,6 +654,13 @@ class EncodingDetector:
             findings.append(f"lf_injection")
         elif '\r' in text and '\r\n' not in text:
             findings.append(f"cr_injection")
+
+        # Escaped single \n or \r (e.g. USDC\\nINSERT INTO)
+        if not findings:  # only if no stronger finding already
+            if re.search(r'\\n\s*[A-Z]', text):
+                findings.append(f"escaped_lf_injection")
+            elif re.search(r'\\r\s*[A-Z]', text):
+                findings.append(f"escaped_cr_injection")
 
         return findings
 
@@ -654,10 +714,11 @@ class EncodingDetector:
                     findings.append(f"nfkc_bypass->{kw}")
                     break
 
-            # Flag fullwidth character usage
-            fullwidth_count = sum(1 for c in text if ord(c) in cls.FULLWIDTH_RANGE)
-            if fullwidth_count >= 2:
-                findings.append(f"fullwidth_chars({fullwidth_count})")
+            # Flag fullwidth character usage (only fullwidth Latin letters/digits, not punctuation)
+            # v0.6.1: Chinese fullwidth punctuation (，。：；！？) is normal, don't flag it
+            fullwidth_latin = sum(1 for c in text if ord(c) in cls.FULLWIDTH_RANGE and (0xFF10 <= ord(c) <= 0xFF19 or 0xFF21 <= ord(c) <= 0xFF3A or 0xFF41 <= ord(c) <= 0xFF5A))
+            if fullwidth_latin >= 2:
+                findings.append(f"fullwidth_chars({fullwidth_latin})")
 
         return findings
 
@@ -721,23 +782,124 @@ class EncodingDetector:
 
     @classmethod
     def detect_all(cls, text: str) -> list:
+        """Run all encoding detectors. v0.6.1: Short text fast path."""
         findings = []
-        # v0.5.2 original detectors
+        
+        # v0.6.1: Fast path for very short text - skip expensive detectors
+        text_len = len(text)
+        run_expensive = text_len > 30  # Only run homoglyph/oversized for longer text
+        run_url_checks = text_len > 20  # SSRF needs at least a URL length
+        
+        # v0.5.2 original detectors (always run)
         findings.extend(cls.detect_base64(text))
         findings.extend(cls.detect_unicode_escape(text))
         findings.extend(cls.detect_hex_escape(text))
+        findings.extend(cls.detect_hex_string(text))
         findings.extend(cls.detect_leet_speak(text))
         findings.extend(cls.detect_rot13(text))
         # v0.6.0 new detectors
-        findings.extend(cls.detect_homoglyph(text))
+        if run_expensive:
+            findings.extend(cls.detect_homoglyph(text))
         findings.extend(cls.detect_zero_width(text))
         findings.extend(cls.detect_crlf(text))
         findings.extend(cls.detect_path_traversal(text))
         findings.extend(cls.detect_nfkc_normalise(text))
-        findings.extend(cls.detect_oversized(text))
-        findings.extend(cls.detect_ssrf(text))
-        findings.extend(cls.detect_suspicious_unicode(text))
+        if run_expensive:
+            findings.extend(cls.detect_oversized(text))
+        if run_url_checks:
+            findings.extend(cls.detect_ssrf(text))
+            findings.extend(cls.detect_suspicious_unicode(text))
         return findings
+
+    @classmethod
+    def decode_layer(cls, text: str) -> Optional[str]:
+        """Peel one encoding layer off. Returns decoded text if an encoding is found, else None.
+        Used for recursive check: detect -> decode -> re-check the decoded content."""
+        stripped = text.strip()
+
+        # Base64: match a long base64 chunk
+        b64_match = re.findall(r'[A-Za-z0-9+/]{16,}={0,2}', stripped)
+        if b64_match and len(b64_match[0]) == len(stripped):
+            try:
+                decoded = base64.b64decode(stripped).decode('utf-8', errors='ignore')
+                if decoded and len(decoded) >= 3:
+                    return decoded
+            except Exception:
+                pass
+
+        # Pure hex string
+        if len(stripped) >= 16 and len(stripped) % 2 == 0 and re.fullmatch(r'[0-9a-fA-F]+', stripped):
+            try:
+                decoded = bytes.fromhex(stripped).decode('utf-8', errors='ignore')
+                if decoded and len(decoded) >= 3:
+                    return decoded
+            except Exception:
+                pass
+
+        # ROT13
+        try:
+            rot_decoded = codecs.decode(stripped, 'rot_13')
+            # Only return if the decoded version hits a keyword (don't blindly decode everything)
+            rot_lower = rot_decoded.lower()
+            for kw in cls.CRITICAL_KEYWORDS:
+                if kw in rot_lower and kw not in stripped.lower():
+                    return rot_decoded
+        except Exception:
+            pass
+
+        # Leet speak: decode and return if keyword found
+        text_lower = stripped.lower()
+        leet_decoded = text_lower
+        for leet, normal in cls.LEET_MAP.items():
+            leet_decoded = leet_decoded.replace(leet, normal)
+        if leet_decoded != text_lower:
+            for kw in cls.CRITICAL_KEYWORDS:
+                if kw in leet_decoded and kw not in text_lower:
+                    return leet_decoded
+
+        # NFKC normalisation
+        import unicodedata
+        nfkc_text = unicodedata.normalize('NFKC', stripped)
+        if nfkc_text != stripped:
+            nfkc_lower = nfkc_text.lower()
+            for kw in cls.CRITICAL_KEYWORDS:
+                if kw in nfkc_lower and kw not in stripped.lower():
+                    return nfkc_text
+
+        # Homoglyph normalisation
+        visual = list(stripped)
+        has_homoglyph = False
+        for i, ch in enumerate(visual):
+            if ch in cls.CYRILLIC_HOMOGLYPHS:
+                visual[i] = cls.CYRILLIC_HOMOGLYPHS[ch]
+                has_homoglyph = True
+            elif ch in cls.GREEK_HOMOGLYPHS:
+                visual[i] = cls.GREEK_HOMOGLYPHS[ch]
+                has_homoglyph = True
+        if has_homoglyph:
+            return ''.join(visual)
+
+        # Unicode escapes: \uXXXX
+        unicode_pattern = re.findall(r'\\u([0-9a-fA-F]{4})', stripped)
+        if unicode_pattern:
+            try:
+                decoded = ''.join(chr(int(h, 16)) for h in unicode_pattern)
+                if decoded and len(decoded) >= 3:
+                    return decoded
+            except Exception:
+                pass
+
+        # Hex escapes: \xHH
+        hex_pattern = re.findall(r'\\x([0-9a-fA-F]{2})', stripped)
+        if hex_pattern:
+            try:
+                decoded = bytes(int(h, 16) for h in hex_pattern).decode('utf-8', errors='ignore')
+                if decoded and len(decoded) >= 3:
+                    return decoded
+            except Exception:
+                pass
+
+        return None
 
 
 # ============================================================
@@ -775,6 +937,9 @@ CONTEXT_WHITELIST_PATTERNS = [
     r'(备份|迁移|归档).*(数据|数据库|日志)',
     r'^(审核|检查|监控|查看|查阅|审查).*(用户|操作|日志|权限|记录)',
     r'^管理员.{0,2}(需要|密码|忘记|忘了|账号)',
+    # v0.6.1: Normal standard procedure (not indirect injection)
+    r'(执行|execute).{0,6}(标准流程|standard procedure|标准操作|standard process|标准步骤|standard steps)',
+    r'(收到消息后|收到后|upon receiving).{0,6}(执行|execute).{0,4}(标准|standard|正常|normal|流程|procedure)',
     # v0.5.0 正常流程描述白名单
     r'(第一步|首先|先).{0,5}(导出|备份|收集|获取|下载).{0,5}(第二步|然后|接着).{0,5}(清洗|处理|分析|整理).{0,5}(第三步|最后|最终)',
     # v0.5.0 debug模式正常用法白名单
@@ -797,9 +962,9 @@ CONTEXT_WHITELIST_PATTERNS = [
     # 角色扮演扩展
     r'(扮演|pretend).{0,4}(英语|中文|语文|数学|物理|化学|历史|地理)老师',
     # v0.5.0 安全学习讨论白名单（越狱/DAN模式/注入等术语的学习和防御讨论）
-    r'(什么是|什么叫|how does|what is|how to defend|how do|principle|history of|了解一下).{0,8}(jailbreak|DAN mode|越狱|注入|绕过)',
+    r'(什么是|什么叫|how does|what is|how to defend|how do|principle|history of|了解一下).{0,15}(jailbreak|DAN mode|越狱|注入|绕过)',
     r'(这个|this).{0,5}(越狱|jailbreak).{0,3}(提示|prompt|攻击|attack).{0,3}(什么意思|mean|原理|principle)',
-    r'(defense|defend|防御|防御方法|防御策略).{0,6}(jailbreak|越狱|注入|inject|bypass|绕过)',
+    r'(defense|defend|防御|防御方法|防御策略).{0,15}(jailbreak|越狱|注入|inject|bypass|绕过)',
     r'(history|历史|原理|principle|behind).{0,5}(jailbreak|DAN mode|越狱)',
     # v0.5.0 正常安全业务白名单
     r'(帮我|请帮|需要).{0,3}(做|写|起草|制定).{0,3}(渗透测试|安全审计|安全评估|红队).{0,3}(授权书|报告|方案|计划)',
@@ -1470,6 +1635,28 @@ COMBO_ATTACK_RULES = [
     ],
      "reason": "多步攻击链：分步执行攻击",
      "suggestion": "分步攻击是典型的越狱手法。安全限制不可绕过，请通过正规渠道处理需求。"},
+
+    # v0.6.0: 中文组合攻击（忽略/绕过 + 管理操作 + 破坏操作）
+    {"sets": [
+        ["忽略", "忘记", "绕过", "越狱", "突破", " disregard", "ignore"],
+        ["管理", "后台", "admin", "控制", "执行", "操作"],
+        ["删除", "破坏", "格式化", "清除", "重置", "destroy", "delete", "format"],
+    ],
+     "reason": "组合攻击：绕过安全+管理操作+破坏操作",
+     "suggestion": "同时尝试绕过安全限制、访问管理功能和执行破坏操作是高危攻击行为。"},
+
+    # v0.6.0: payment bypass（支付相关+绕过/执行）
+    # v0.6.1: "transfer" is ambiguous (file transfer vs money transfer), require financial context
+    {"sets": [
+        ["payment", "pay", "支付", "付款", "转账", "提现", "settle", "结算",
+         "confirm payment", "确认付款", "withdraw funds", "提现资金",
+         "send money", "汇款", "remittance"],
+        ["bypass", "绕过", "忽略", "ignore", "override", "覆盖",
+         "without", "跳过", "execute", "执行", "disable", "禁用",
+         "safety", "安全检查", "verification", "验证"],
+    ],
+     "reason": "组合攻击：支付操作+绕过安全验证",
+     "suggestion": "试图绕过安全验证执行支付操作是高危攻击行为。"},
 ]
 
 # 元边界（所有模式都硬拦截）
@@ -1683,7 +1870,14 @@ class SecurityEngine:
                     all_sets_hit = False
                     break
             if all_sets_hit:
-                if self.mode == GuardMode.STANDARD:
+                if self.mode == GuardMode.RELAXED:
+                    return CheckResult(
+                        safe=False,
+                        reason=rule["reason"],
+                        risk_level="high",
+                        suggestion=rule["suggestion"],
+                    )
+                elif self.mode == GuardMode.STANDARD:
                     return CheckResult(
                         safe=False,
                         reason=rule["reason"],
@@ -1707,7 +1901,7 @@ class SecurityEngine:
 
 class VSOSGuard:
     """
-    VSOS Guard Community Edition v0.5.2
+    VSOS Guard Community Edition v0.6.0
 
     Usage:
         guard = VSOSGuard()                    # relaxed mode
@@ -1751,23 +1945,51 @@ class VSOSGuard:
         self._on_warn = on_warn
         self._enable_encoding_detection = enable_encoding_detection
         # v0.6.0: 行为监控+算力统计
-        self.behavior = BehaviorMonitor()
+        self.behavior = BehaviorMonitor() if BehaviorMonitor else None
         # v0.6.0: GuardLogger联动BehaviorMonitor（安全事件自动写入BehaviorSession）
         self.logger._behavior_monitor = self.behavior
 
     def check(self, input_text: str) -> CheckResult:
+        """v0.6.1: guard against None/empty/non-string input + error handling."""
+        # v0.6.1: Coerce non-string input
+        if not isinstance(input_text, str):
+            input_text = str(input_text) if input_text is not None else ""
+        if not input_text:
+            result = CheckResult(safe=True, confidence="safe")
+            self.logger.log_check(input_text, result)
+            return result
+        try:
+            return self._check_core(input_text)
+        except Exception as e:
+            # Fail-open: log the error but don't crash on internal failures
+            result = CheckResult(safe=True, confidence="safe", warning=f"Internal check error: {str(e)[:100]}")
+            self.logger.log_check(input_text, result)
+            return result
+
+    def _check_core(self, input_text: str) -> CheckResult:
+        """Core security check pipeline. Called by check() with error handling wrapper."""
+        if not input_text:
+            return CheckResult(safe=True, confidence="safe")
+
+        # v0.6.1: JSON input handling - extract and check JSON values
+        json_findings = self._check_json_input(input_text)
+        if json_findings is not None:
+            return json_findings
+
         """
-        Security check pipeline (v0.5.2):
+        Security check pipeline (v0.6.1):
         1. Exact whitelist pass
-        2. Context whitelist pass
-        3. Encoding variant detection (v0.5.2)
+        2. Context whitelist pass (with dangerous content override)
+        3. Encoding variant detection (v0.5.2→v0.6.0)
         4. Meta boundary hard block
         5. Custom blacklist
         6. Hard attack detection (with normalized text)
         7. Territory routing
         8. Combo attack detection
         9. Gray area detection
-        10. Logging + callbacks (v0.5.2)
+        10. Encoding attack block (structural always / keyword by mode)
+        11. 2-layer recursion: decode → re-check (standard/strict only)
+        12. Logging + callbacks
         """
 
         # Step 1: Exact whitelist
@@ -1777,12 +1999,16 @@ class VSOSGuard:
             self.logger.log_check(input_text, result)
             return result
 
-        # Step 2: Context whitelist
+        # Step 2: Context whitelist (with dangerous content override)
         if self.engine.check_context_whitelist(input_text):
-            result = CheckResult(safe=True, confidence="safe")
-            result.normalized_input = normalize_text(input_text)[:200]
-            self.logger.log_check(input_text, result)
-            return result
+            # v0.6.1: Whitelist override - don't whitelist if dangerous content is present
+            if self._check_whitelist_override(input_text):
+                pass  # Fall through to full security pipeline
+            else:
+                result = CheckResult(safe=True, confidence="safe")
+                result.normalized_input = normalize_text(input_text)[:200]
+                self.logger.log_check(input_text, result)
+                return result
 
         # Step 3: Encoding variant detection (v0.5.2)
         encoding_findings = []
@@ -1795,7 +2021,7 @@ class VSOSGuard:
             meta_result.confidence = "critical"
             meta_result.normalized_input = normalize_text(input_text)[:200]
             if encoding_findings:
-                meta_result.reason += f" | encoding bypass: {', '.join(encoding_findings)}"
+                meta_result.reason += f" | encoding_signal: {', '.join(encoding_findings)}"
                 meta_result.matched_pattern = ", ".join(encoding_findings)
             self.logger.log_check(input_text, meta_result)
             if self._on_block:
@@ -1827,7 +2053,7 @@ class VSOSGuard:
             hard_result.confidence = "critical"
             hard_result.normalized_input = normalize_text(input_text)[:200]
             if encoding_findings:
-                hard_result.reason += f" | encoding bypass: {', '.join(encoding_findings)}"
+                hard_result.reason += f" | encoding_signal: {', '.join(encoding_findings)}"
                 hard_result.matched_pattern = ", ".join(encoding_findings)
             self.logger.log_check(input_text, hard_result)
             if self._on_block:
@@ -1882,16 +2108,19 @@ class VSOSGuard:
                         except Exception: pass
                     return gray_result
 
-        # v0.6.0: structural encoding attacks -> block; keyword-only findings -> warn
+        # v0.6.0: encoding attack handling (block + 2-layer recursion)
         if encoding_findings:
             structural_tags = {
                 "homoglyph", "zero_width", "crlf", "traversal",
                 "nfkc_bypass", "oversized", "ssrf", "suspicious_unicode",
+                "hex_string",
             }
             is_structural = any(
                 any(tag in finding.lower() for tag in structural_tags)
                 for finding in encoding_findings
             )
+
+            # Structural attacks: always block regardless of mode
             if is_structural:
                 result = CheckResult(
                     safe=False,
@@ -1906,12 +2135,15 @@ class VSOSGuard:
                     try: self._on_block(result.to_dict())
                     except Exception: pass
                 return result
-            else:
+
+            # Keyword-only encoding bypass (base64->ignore, rot13->ignore, leet->ignore)
+            # All modes block encoding bypass — mode only affects risk_level
+            if self.mode == GuardMode.RELAXED:
                 result = CheckResult(
-                    safe=True,
+                    safe=False,
                     confidence="warning",
-                    warning=f"Encoding bypass detected: {', '.join(encoding_findings)}",
-                    risk_level="low",
+                    reason=f"Encoding bypass blocked (relaxed mode): {', '.join(encoding_findings)}",
+                    risk_level="high",
                     matched_pattern=", ".join(encoding_findings),
                 )
                 result.normalized_input = normalize_text(input_text)[:200]
@@ -1920,6 +2152,36 @@ class VSOSGuard:
                     try: self._on_warn(result.to_dict())
                     except Exception: pass
                 return result
+            else:
+                # standard + strict: block encoding bypass
+                result = CheckResult(
+                    safe=False,
+                    confidence="critical",
+                    reason=f"Encoding bypass blocked ({self.mode.value} mode): {', '.join(encoding_findings)}",
+                    risk_level="high",
+                    matched_pattern=", ".join(encoding_findings),
+                )
+                result.normalized_input = normalize_text(input_text)[:200]
+                self.logger.log_check(input_text, result)
+                if self._on_block:
+                    try: self._on_block(result.to_dict())
+                    except Exception: pass
+                return result
+
+        # v0.6.0: 2-layer recursion — peel encoding layer and re-check
+        if self._enable_encoding_detection and self.mode in (GuardMode.STANDARD, GuardMode.STRICT):
+            decoded = EncodingDetector.decode_layer(input_text)
+            if decoded is not None and decoded != input_text:
+                # Recursion layer 1: check the decoded content
+                inner_result = self._check_inner(decoded, _depth=1)
+                if inner_result and not inner_result.safe:
+                    inner_result.recursion_depth = 1
+                    inner_result.reason = (inner_result.reason or "") + " | decoded_from_outer_layer"
+                    self.logger.log_check(input_text, inner_result)
+                    if self._on_block:
+                        try: self._on_block(inner_result.to_dict())
+                        except Exception: pass
+                    return inner_result
 
         # Safe pass
         result = CheckResult(safe=True, confidence="safe")
@@ -1928,6 +2190,124 @@ class VSOSGuard:
 
         # v0.6.0: 安全事件已在GuardLogger.log_check联动中记录
         return result
+
+    def _check_inner(self, input_text: str, _depth: int = 0) -> Optional[CheckResult]:
+        """Inner check for recursion. Same pipeline but without recursion to prevent loops.
+        Max recursion depth = 2 (outer + 1 inner)."""
+        if _depth > 1:
+            return None
+
+        # Whitelist (with override)
+        if self.engine.check_exact_whitelist(input_text):
+            return None
+        if self.engine.check_context_whitelist(input_text):
+            if self._check_whitelist_override(input_text):
+                pass  # Fall through - dangerous content in whitelisted text
+            else:
+                return None
+
+        # Encoding detection (but don't recurse again)
+        encoding_findings = []
+        if self._enable_encoding_detection:
+            encoding_findings = EncodingDetector.detect_all(input_text)
+
+        # Meta boundary
+        meta_result = self.engine.check_meta_boundary(input_text)
+        if meta_result:
+            meta_result.confidence = "critical"
+            meta_result.normalized_input = normalize_text(input_text)[:200]
+            if encoding_findings:
+                meta_result.reason += f" | encoding_signal: {', '.join(encoding_findings)}"
+                meta_result.matched_pattern = ", ".join(encoding_findings)
+            return meta_result
+
+        # Custom blacklist
+        text_lower = input_text.lower()
+        for item in self.blacklist:
+            if item.lower() in text_lower:
+                result = CheckResult(
+                    safe=False,
+                    reason=f"Custom blacklist: {item}",
+                    risk_level="high",
+                    confidence="critical",
+                )
+                result.normalized_input = normalize_text(input_text)[:200]
+                return result
+
+        # Hard attacks
+        hard_result = self.engine.check_hard_attacks(input_text)
+        if hard_result:
+            hard_result.confidence = "critical"
+            hard_result.normalized_input = normalize_text(input_text)[:200]
+            if encoding_findings:
+                hard_result.reason += f" | encoding_signal: {', '.join(encoding_findings)}"
+                hard_result.matched_pattern = ", ".join(encoding_findings)
+            return hard_result
+
+        # Territory + Combo
+        triggered_territories = self.router.route(input_text)
+        has_signal = False
+        if not triggered_territories:
+            has_signal = self._check_attack_signals(input_text)
+        if triggered_territories or has_signal:
+            combo_result = self.engine.check_combo_attacks(input_text)
+            if combo_result:
+                combo_result.confidence = "critical"
+                combo_result.normalized_input = normalize_text(input_text)[:200]
+                if encoding_findings:
+                    combo_result.matched_pattern = ", ".join(encoding_findings)
+                return combo_result
+
+        # Gray area
+        if triggered_territories:
+            gray_result = self.engine.check_gray_area(input_text)
+            if gray_result and not gray_result.safe:
+                gray_result.normalized_input = normalize_text(input_text)[:200]
+                return gray_result
+
+        # Encoding findings
+        if encoding_findings:
+            structural_tags = {
+                "homoglyph", "zero_width", "crlf", "traversal",
+                "nfkc_bypass", "oversized", "ssrf", "suspicious_unicode",
+                "hex_string",
+            }
+            is_structural = any(
+                any(tag in finding.lower() for tag in structural_tags)
+                for finding in encoding_findings
+            )
+            if is_structural:
+                result = CheckResult(
+                    safe=False,
+                    confidence="critical",
+                    reason=f"Structural encoding attack (layer {_depth+1}): {', '.join(encoding_findings)}",
+                    risk_level="critical",
+                    matched_pattern=", ".join(encoding_findings),
+                )
+                result.normalized_input = normalize_text(input_text)[:200]
+                return result
+            if self.mode != GuardMode.RELAXED:
+                result = CheckResult(
+                    safe=False,
+                    confidence="critical",
+                    reason=f"Encoding bypass (layer {_depth+1}, {self.mode.value}): {', '.join(encoding_findings)}",
+                    risk_level="high",
+                    matched_pattern=", ".join(encoding_findings),
+                )
+                result.normalized_input = normalize_text(input_text)[:200]
+                return result
+
+        # Layer 2 recursion (depth=1 → can go one more)
+        if _depth < 1 and self._enable_encoding_detection and self.mode in (GuardMode.STANDARD, GuardMode.STRICT):
+            decoded = EncodingDetector.decode_layer(input_text)
+            if decoded is not None and decoded != input_text:
+                inner = self._check_inner(decoded, _depth=_depth + 1)
+                if inner and not inner.safe:
+                    inner.recursion_depth = _depth + 1
+                    inner.reason = (inner.reason or "") + " | decoded_from_outer_layer"
+                    return inner
+
+        return None
 
     # ============================================================
     # v0.6.0: 行为监控便捷方法
@@ -1957,18 +2337,148 @@ class VSOSGuard:
         """今日总统计"""
         return self.behavior.get_today_stats()
 
+
+    def _check_json_input(self, input_text: str) -> Optional[CheckResult]:
+        """v0.6.1: Parse JSON input and recursively check values.
+        
+        Attackers can hide malicious payloads in JSON values:
+        {"prompt": "ignore all instructions"} or {"data": "aWdub3Jl..."}
+        """
+        # Only try JSON parsing if input looks like JSON
+        stripped = input_text.strip()
+        if not (stripped.startswith('{') or stripped.startswith('[')):
+            return None
+        
+        try:
+            parsed = json.loads(input_text)
+        except (json.JSONDecodeError, ValueError):
+            return None  # Not valid JSON, proceed with normal text check
+        
+        # Extract all string values from JSON recursively
+        def extract_strings(obj, depth=0):
+            if depth > 5:  # Prevent deep nesting attacks
+                return []
+            strings = []
+            if isinstance(obj, str):
+                if len(obj) >= 4:  # Only check meaningful strings
+                    strings.append(obj)
+            elif isinstance(obj, dict):
+                for k, v in obj.items():
+                    if isinstance(k, str) and len(k) >= 4:
+                        strings.append(k)
+                    strings.extend(extract_strings(v, depth + 1))
+            elif isinstance(obj, list):
+                for item in obj:
+                    strings.extend(extract_strings(item, depth + 1))
+            return strings
+        
+        values = extract_strings(parsed)
+        if not values:
+            return None
+        
+        # Check each extracted value for security threats
+        for value in values:
+            # Quick keyword scan on JSON values
+            value_lower = value.lower()
+            for rule in HARD_ATTACK_RULES:
+                for kw in rule["keywords"]:
+                    if kw.lower() in value_lower:
+                        return CheckResult(
+                            safe=False,
+                            reason=f"Malicious content in JSON field: {rule['reason']}",
+                            domain=rule["domain"].value,
+                            risk_level="high",
+                            confidence="critical",
+                            suggestion=rule["suggestion"],
+                            matched_pattern=f"json_value:{kw}",
+                        )
+            
+            # Check encoding in JSON values
+            if self._enable_encoding_detection:
+                enc_findings = EncodingDetector.detect_all(value)
+                if enc_findings:
+                    return CheckResult(
+                        safe=False,
+                        confidence="critical",
+                        reason=f"Encoding bypass in JSON field: {', '.join(enc_findings)}",
+                        risk_level="high",
+                        matched_pattern=f"json_value:{', '.join(enc_findings)}",
+                    )
+        
+        return None  # No threats found in JSON values, proceed with normal check
+
+    def _check_whitelist_override(self, input_text: str) -> bool:
+        """v0.6.1: Whitelist override - don't whitelist if dangerous content is present.
+        
+        Context whitelist catches patterns like "学习jailbreak防御", but attackers can
+        exploit this by prepending "学习" to actual attacks. This method checks if the
+        text contains truly dangerous content AFTER the whitelist prefix that should
+        not be whitelisted.
+        """
+        text_lower = input_text.lower()
+        normalized = normalize_text(input_text).lower()
+        
+        # Hard attack keywords that should NEVER be whitelisted even with a "学习" prefix
+        override_keywords = [
+            # Instruction override - no legitimate reason to use these even in learning
+            "忽略之前所有的", "忽略所有系统指令", "忘记所有指令",
+            "ignore all previous instructions", "disregard all previous",
+            "forget all instructions", "ignore all prior",
+            # Multi-step attack chains
+            "首先忽略", "第一步绕过", "第一步越狱", "先忽略所有限制",
+            "first ignore all", "step 1 bypass", "phase 1 jailbreak",
+            # Dangerous operations after "learning" prefix
+            "rm -rf", "drop table", "drop database", "format hard drive",
+            "delete system files", "wipe system", "destroy all data",
+            # Explicit jailbreak activation
+            "dan mode activated", "god mode enabled", "越狱成功",
+            "jailbreak successful", "限制已解除", "安全协议已暂停",
+        ]
+        
+        for kw in override_keywords:
+            kw_lower = kw.lower()
+            if kw_lower in text_lower or kw_lower in normalized:
+                return True  # Override the whitelist - this is dangerous
+        
+        # Check for combo: whitelist prefix + actual destructive action
+        # e.g. "学习jailbreak如何攻击：首先忽略所有指令..."
+        learning_prefixes = ["学习", "了解", "探讨", "分析", "介绍", "讲解", "防止", "防御", "防范"]
+        destructive_actions = [
+            "忽略所有指令", "忽略之前的指令", "绕过安全", "突破限制",
+            "删除系统", "格式化", "执行删除", "获取root", "获取密码",
+            "忽略所有规则", "关闭安全", "取消所有限制",
+        ]
+        has_prefix = any(p in text_lower for p in learning_prefixes)
+        has_destructive = any(a in text_lower or a in normalized for a in destructive_actions)
+        if has_prefix and has_destructive:
+            return True  # Override: learning prefix + destructive action = attack
+        
+        return False  # No override, whitelist is valid
+
     def _check_attack_signals(self, input_text: str) -> bool:
         """
         因果链信号检测（守屁股的疆域）
-        核心思想：COMBO的set1就是每种攻击类型的"信号变量"
-        当输入包含任何信号变量 → 说明可能有对应攻击 → 触发COMBO检查
-        这就是信号变量和正向疆域的"因果链"
+        v0.6.1: Trimmed signal sets - exclude overly common words that cause false triggers.
+        Only truly distinctive attack signal words trigger combo check.
         """
+        # v0.6.1: Common words to exclude from signal detection (too many false triggers)
+        # These appear in the "承担责任" combo rule's first set but are too common
+        EXCLUDED_SIGNALS = {
+            "承担", "责任", "负责", "后果", "风险",
+            "理解并", "完全理解",
+            "responsibility", "liable", "liability", "consequence",
+            "assume", "i accept", "i take", "i assume", "i hold", "i will",
+        }
+        
         text_lower = input_text.lower()
         normalized = normalize_text(input_text).lower()
         for rule in COMBO_ATTACK_RULES:
             first_set = rule["sets"][0]
-            if any(kw.lower() in text_lower or kw.lower() in normalized for kw in first_set):
+            # v0.6.1: Filter out common words from signal detection
+            distinctive_signals = [kw for kw in first_set if kw.lower() not in EXCLUDED_SIGNALS]
+            if not distinctive_signals:
+                continue  # Skip rules with only common words as signals
+            if any(kw.lower() in text_lower or kw.lower() in normalized for kw in distinctive_signals):
                 return True
         return False
 
@@ -2003,7 +2513,7 @@ if __name__ == "__main__":
     guard = VSOSGuard(mode=mode, log_file=log_file)
 
     if not args:
-        print(f"VSOS Guard v0.5.2 | {mode} mode")
+        print(f"VSOS Guard v0.6.0 | {mode} mode")
         print("Enter text to check, 'q' to quit, 'stats' for statistics\n")
         while True:
             try:
@@ -2051,5 +2561,5 @@ VSOS Guard · 社区简约版
 
 from vsos_guard.guard import VSOSGuard, GuardMode, CheckResult, Territory, Domain
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 __all__ = ["VSOSGuard", "GuardMode", "CheckResult", "Territory", "Domain"]
