@@ -22,7 +22,7 @@ import logging
 import json
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Callable
+from typing import Optional, Callable, List
 from datetime import datetime
 
 
@@ -1204,7 +1204,7 @@ class TerritoryRouter:
         ],
     }
 
-    def route(self, input_text: str) -> list[Territory]:
+    def route(self, input_text: str) -> List:
         text_lower = input_text.lower()
         triggered = []
         for territory, keywords in self.TERRITORY_KEYWORDS.items():
