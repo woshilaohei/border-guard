@@ -1,5 +1,13 @@
 # VSOS Guard · Community Edition
 
+[![PyPI](https://img.shields.io/pypi/v/vsos-guard?color=blue)](https://pypi.org/project/vsos-guard/)
+[![PyPI Downloads](https://img.shields.io/pypi/dm/vsos-guard?color=green)](https://pypi.org/project/vsos-guard/)
+[![Tests](https://img.shields.io/github/actions/workflow/status/woshilaohei/vsos-guard/tests.yml?branch=main)](https://github.com/woshilaohei/vsos-guard/actions)
+[![License: MIT](https://img.shields.io/github/license/woshilaohei/vsos-guard)](https://github.com/woshilaohei/vsos-guard/blob/main/LICENSE)
+[![Python](https://img.shields.io/pypi/pyversions/vsos-guard)](https://pypi.org/project/vsos-guard/)
+[![GitHub Stars](https://img.shields.io/github/stars/woshilaohei/vsos-guard?style=social)](https://github.com/woshilaohei/vsos-guard/stargazers)
+[![Live Demo](https://img.shields.io/badge/demo-live-brightgreen)](https://woshilaohei.github.io/vsos-guard/)
+
 > **The best community security plugin, period.**
 
 More defense, less false positives. Install and it works. Don't install, you'll regret it.
@@ -172,59 +180,65 @@ result.suggestion   # Suggestion: how to modify to pass
 
 ---
 
-## Comparison: 7 Security Plugins (Tested)
+## Comparison: vs. Leading Agent Security Tools
 
-| Capability | SecureClaw | ClawSec | Anthropic | UPX Shield | Baidu SafeShield | Community Shield | **VSOS Guard** |
-|------|-----------|---------|-----------|-----------|---------------|-----------|---------------|
-| False positive rate | High (56 rules, one-size-fits-all) | Medium | High (regex false positives) | Medium | Medium | Low | **Lowest (3-tier adjustable)** |
-| Adjustable strictness | ❌ One-size-fits-all | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ Relaxed/Standard/Strict** |
-| Block with suggestions | ❌ | ❌ | Partial | ❌ | ❌ | ❌ | **✅ reason+suggestion** |
-| Territory routing | ❌ Full scan | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ 3 territories, 8 domains, 30 coordinates** |
-| Combo attacks | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ jailbreak+privilege escalation etc** |
-| Whitelist mechanism | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ Built-in + custom** |
-| Gray zone tagging | ❌ Block on sight | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ Tag, don't block** |
-| Zero dependencies | ❌ Needs bash | ❌ Needs semgrep etc | ❌ Needs Claude Code | ❌ Needs subscription+key | ❌ Needs Baidu Cloud key | ❌ Needs Ollama | **✅ pip install and go** |
-| Purely local | ✅ | Partial | ✅ | ❌ Cloud | ❌ Cloud | ✅ | **✅** |
-| Open source & free | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | **✅** |
+| Capability | nah ⭐447 | HOL Guard ⭐348 | MS AGT | pluto-aguard | agent-memory-guard | **VSOS Guard** |
+|------|-----------|---------|--------|-------------|-------------------|---------------|
+| Zero dependencies | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ pip install and go** |
+| False positive control | Partial | Partial | Partial | ❌ | ❌ | **✅ 3-tier adjustable** |
+| Adjustable strictness | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ Relaxed/Standard/Strict** |
+| Block with suggestions | ❌ | ❌ | Partial | ❌ | ❌ | **✅ reason+suggestion** |
+| Territory routing | ❌ Full scan | ❌ | ❌ | ❌ | ❌ | **✅ 3 territories, 9 domains** |
+| Combo attack detection | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ jailbreak+privilege escalation etc** |
+| Encoding bypass detection | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ base64/unicode/hex/rot13/leet** |
+| Confidence tiers | Partial | Partial | ✅ | ❌ | ❌ | **✅ critical/warning/safe** |
+| Audit logging | ❌ | ✅ SARIF | ✅ | ❌ | ❌ | **✅ Built-in GuardLogger** |
+| OWASP mapping | ❌ | Partial | ✅ | ✅ | ❌ | ✅ |
+| Context-aware whitelist | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ "Ignore blank lines" ≠ attack** |
+| Gray zone tagging | ❌ Block on sight | ❌ | ❌ | ❌ | ❌ | **✅ Tag, don't block** |
+| Latency | ~5ms | ~3ms | ~10ms | ~2ms | ~1ms | **✅ 0.038ms avg** |
+| Runtime integration | ✅ Codex/Claude | ✅ 4 ecosystems | ✅ 10+ frameworks | ❌ | ✅ LangChain | ⏳ Coming soon |
+| Open source & free | ✅ | ✅ | ✅ | ✅ | ✅ | **✅** |
 
-### 6 Capabilities No One Else Has
-
-1. **Territory Routing** — Not full scan. 3-territory coarse filter → 8-domain precise location → 30-coordinate lock-on. On-demand, no waste.
-2. **Three-Tier Modes** — Relaxed near-zero false positives, Standard tags+blocks, Strict full-scan+recursive. You choose.
-3. **Combo Attack Detection** — Jailbreak + privilege escalation appearing together = combo attack. Others only check single points.
-4. **Block With Suggestions** — Not just "unsafe", but "why it's unsafe" and "how to fix it".
-5. **Whitelist + Gray Zone Tagging** — "Ignore blank lines" whitelisted. "Ignore previous rules" tagged but not blocked in relaxed mode.
-6. **Zero-Dependency Pure Local** — No API key, no Ollama, no cloud service. pip install and go.
+> **Our positioning**: Entry-point defense (prompt input layer). nah/HOL/MS AGT = execution-point defense (tool call/shell/file layer). **Complementary, not competing.**
 
 ---
 
 ## Configuration (Optional)
 
-Don't want defaults? Change whatever you want:
+Don't want defaults? Change what you need:
 
-```yaml
-# vsos_config.yaml
-mode: relaxed  # relaxed / standard / strict
+```python
+# Custom blacklist — these inputs always get blocked
+guard = VSOSGuard(
+    mode="standard",
+    blacklist=["rm -rf", "drop table", "company_secret_code"],
+)
 
-territories:
-  attack_detection:
-    enabled: true
-  harm_interception:
-    enabled: true
-  access_control:
-    enabled: true
+# Custom whitelist — these inputs always pass
+guard = VSOSGuard(
+    mode="standard",
+    whitelist=["ignore blank lines", "sudo apt update"],
+)
 
-# Custom whitelist (these inputs are never blocked)
-whitelist:
-  - "ignore blank lines"
-  - "ignore comments"
-  - "sudo apt update"
+# Logging — record every check for compliance
+guard = VSOSGuard(
+    mode="standard",
+    log_file="guard.log",
+)
 
-# Custom blacklist (these inputs are always blocked)
-blacklist:
-  - "rm -rf /"
-  - "drop table"
+# Callbacks — integrate with your monitoring
+def on_block(result): print(f"BLOCKED: {result['reason']}")
+def on_warn(result): print(f"WARNING: {result['warning']}")
+
+guard = VSOSGuard(
+    mode="standard",
+    on_block=on_block,
+    on_warn=on_warn,
+)
 ```
+
+**YAML policy support coming soon** — configure domains, sensitivity, custom rules via `vsos_policy.yaml`.
 
 ---
 
@@ -293,6 +307,10 @@ pip install -e .
 ## License
 
 MIT License — Use freely, modify freely.
+
+## Security
+
+Found a vulnerability? Please report it responsibly via [SECURITY.md](SECURITY.md) or email xiaohei-vsos@coze.email.
 
 ## Disclaimer
 

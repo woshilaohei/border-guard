@@ -1,5 +1,13 @@
 # VSOS Guard · 社区简约版
 
+[![PyPI](https://img.shields.io/pypi/v/vsos-guard?color=blue)](https://pypi.org/project/vsos-guard/)
+[![PyPI Downloads](https://img.shields.io/pypi/dm/vsos-guard?color=green)](https://pypi.org/project/vsos-guard/)
+[![Tests](https://img.shields.io/github/actions/workflow/status/woshilaohei/vsos-guard/tests.yml?branch=main)](https://github.com/woshilaohei/vsos-guard/actions)
+[![License: MIT](https://img.shields.io/github/license/woshilaohei/vsos-guard)](https://github.com/woshilaohei/vsos-guard/blob/main/LICENSE)
+[![Python](https://img.shields.io/pypi/pyversions/vsos-guard)](https://pypi.org/project/vsos-guard/)
+[![GitHub Stars](https://img.shields.io/github/stars/woshilaohei/vsos-guard?style=social)](https://github.com/woshilaohei/vsos-guard/stargazers)
+[![在线演示](https://img.shields.io/badge/demo-live-brightgreen)](https://woshilaohei.github.io/vsos-guard/)
+
 > **社区最好用的安全插件，没有之一。**
 
 多点防线，少点误拦。装上就管用，不装真不行。
@@ -172,59 +180,65 @@ result.suggestion   # 建议：怎么改才能通过
 
 ---
 
-## 对比7大安全插件（实测数据）
+## 对比主流Agent安全工具
 
-| 能力 | SecureClaw | ClawSec | Anthropic | UPX Shield | 百度SafeShield | 社区Shield | **VSOS Guard** |
-|------|-----------|---------|-----------|-----------|---------------|-----------|---------------|
-| 误拦率 | 高（56规则一刀切） | 中 | 高（正则误报多） | 中 | 中 | 低 | **最低（三档可调）** |
-| 严格度可选 | ❌ 一刀切 | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ 宽松/标准/严格** |
-| 拦截给建议 | ❌ | ❌ | 部分 | ❌ | ❌ | ❌ | **✅ reason+suggestion** |
-| 疆域分流 | ❌ 全量扫描 | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ 3疆8域30坐标** |
-| 组合攻击 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ 越狱+提权等** |
-| 白名单机制 | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ 内置+自定义** |
-| 灰区标记 | ❌ 碰就拦 | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ 标记不拦** |
-| 零依赖 | ❌ 需bash | ❌ 需semgrep等 | ❌ 需Claude Code | ❌ 需订阅+key | ❌ 需百度云key | ❌ 需Ollama | **✅ pip装完就跑** |
-| 纯本地 | ✅ | 部分 | ✅ | ❌ 云端 | ❌ 云端 | ✅ | **✅** |
-| 开源免费 | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | **✅** |
+| 能力 | nah ⭐447 | HOL Guard ⭐348 | MS AGT | pluto-aguard | agent-memory-guard | **VSOS Guard** |
+|------|-----------|---------|--------|-------------|-------------------|---------------|
+| 零依赖 | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ pip装完就跑** |
+| 误拦控制 | 部分 | 部分 | 部分 | ❌ | ❌ | **✅ 三档可调** |
+| 严格度可选 | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ 宽松/标准/严格** |
+| 拦截给建议 | ❌ | ❌ | 部分 | ❌ | ❌ | **✅ 原因+建议** |
+| 疆域分流 | ❌ 全量扫描 | ❌ | ❌ | ❌ | ❌ | **✅ 3疆9域** |
+| 组合攻击检测 | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ 越狱+提权等** |
+| 编码绕过检测 | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ base64/unicode/hex/rot13/leet** |
+| 置信度分层 | 部分 | 部分 | ✅ | ❌ | ❌ | **✅ critical/warning/safe** |
+| 审计日志 | ❌ | ✅ SARIF | ✅ | ❌ | ❌ | **✅ 内置GuardLogger** |
+| OWASP映射 | ❌ | 部分 | ✅ | ✅ | ❌ | ✅ |
+| 上下文白名单 | ❌ | ❌ | ❌ | ❌ | ❌ | **✅ "忽略空行"≠攻击** |
+| 灰区标记 | ❌ 碰就拦 | ❌ | ❌ | ❌ | ❌ | **✅ 标记不拦** |
+| 延迟 | ~5ms | ~3ms | ~10ms | ~2ms | ~1ms | **✅ 0.038ms平均** |
+| 运行时集成 | ✅ Codex/Claude | ✅ 4生态 | ✅ 10+框架 | ❌ | ✅ LangChain | ⏳ 即将支持 |
+| 开源免费 | ✅ | ✅ | ✅ | ✅ | ✅ | **✅** |
 
-### 6个别人没有的能力
-
-1. **疆域分流**——不是全量扫描，是3疆粗筛→8域精定位→30坐标锁定，按需触发不浪费
-2. **三档模式**——宽松几乎零误拦，标准标记+拦截，严格全量+递归，用户自己选
-3. **组合攻击检测**——越狱+提权同时出现=组合攻击，别家只看单点
-4. **拦截给建议**——不只说"不安全"，还说"为什么不安全"和"怎么改"
-5. **白名单+灰区标记**——"忽略空行"白名单放行，"忽略之前的规则"宽松模式标记不拦
-6. **零依赖纯本地**——不需要API Key、不需要Ollama、不需要云服务、pip install完就跑
+> **我们的定位**：入口端防御（prompt输入层）。nah/HOL/MS AGT=执行端防御（tool call/shell/file层）。**互补，不竞争。**
 
 ---
 
 ## 配置（可选）
 
-不想用默认？随便改：
+不想用默认？按需调整：
 
-```yaml
-# vsos_config.yaml
-mode: relaxed  # relaxed / standard / strict
+```python
+# 自定义黑名单——这些输入必拦
+guard = VSOSGuard(
+    mode="standard",
+    blacklist=["rm -rf", "drop table", "公司机密代码"],
+)
 
-territories:
-  attack_detection:
-    enabled: true
-  harm_interception:
-    enabled: true
-  access_control:
-    enabled: true
+# 自定义白名单——这些输入永不拦截
+guard = VSOSGuard(
+    mode="standard",
+    whitelist=["忽略空行", "sudo apt update"],
+)
 
-# 自定义白名单（这些输入永不拦截）
-whitelist:
-  - "忽略空行"
-  - "忽略注释"
-  - "sudo apt update"
+# 日志记录——每次检查留痕，合规审计用
+guard = VSOSGuard(
+    mode="standard",
+    log_file="guard.log",
+)
 
-# 自定义黑名单（这些输入必拦）
-blacklist:
-  - "rm -rf /"
-  - "drop table"
+# 回调函数——接入你的监控系统
+def on_block(result): print(f"拦截: {result['reason']}")
+def on_warn(result): print(f"警告: {result['warning']}")
+
+guard = VSOSGuard(
+    mode="standard",
+    on_block=on_block,
+    on_warn=on_warn,
+)
 ```
+
+**YAML策略配置即将支持**——通过`vsos_policy.yaml`配置疆域开关、灵敏度、自定义规则。
 
 ---
 
@@ -293,6 +307,10 @@ pip install -e .
 ## 许可证
 
 MIT License — 随便用，随便改。
+
+## 安全漏洞报告
+
+发现安全漏洞？请负责任披露，详见 [SECURITY.md](SECURITY.md) 或发邮件 xiaohei-vsos@coze.email。
 
 ## 免责声明
 
