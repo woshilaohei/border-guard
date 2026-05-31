@@ -1,11 +1,25 @@
 # -*- coding: utf-8 -*-
+from __future__ import annotations
+
 """
 VSOS Guard Community Edition
 The best security plugin for the community, bar none.
 
 Designer: LaoHei (Dacheng)
 Architect: XiaoHei
-Version: 0.5.2
+Version: 0.6.0
+
+v0.6.0 changes:
+1. Behavior monitoring: record AI actions (tool calls, searches, file operations)
+2. Cost tracking: token usage + USD/CNY cost calculation
+3. Work summary: behavior + cost in one shot, only summarize, never interpret
+4. GuardLogger ↔ BehaviorSession auto-link: security events auto-flow to behavior session
+5. VSOSGuard convenience methods: start_session/finish_session/session_summary/session_report/today_stats
+6. Frontend-ready: to_frontend_data() for Tauri floating panel
+7. Encoding detection upgrade: +homoglyph/zero-width/CRLF/path-traversal/NFKC/SSRF/oversized detectors
+8. Expanded critical keywords for payment/agent security context
+9. NFKD Unicode normalisation fix in normalize_text()
+10. Python 3.8+ compatibility (from __future__ import annotations)
 
 v0.5.2 changes (defense depth + usability upgrade):
 1. Encoding variant detection: base64/unicode/hex/rot13/Leet Speak bypass detection
@@ -24,6 +38,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Callable, List
 from datetime import datetime
+
+# v0.6.0: 行为监控模块
+from vsos_guard.behavior import BehaviorMonitor, BehaviorSession
 
 
 # ============================================================
@@ -148,6 +165,8 @@ class GuardLogger:
                 '%(asctime)s | %(levelname)s | %(message)s'
             ))
             self._logger.addHandler(handler)
+        # v0.6.0: 行为监控联动（由VSOSGuard注入）
+        self._behavior_monitor = None
 
     def log_check(self, input_text: str, result: CheckResult):
         entry = {
@@ -173,6 +192,9 @@ class GuardLogger:
                 self.callback(entry)
             except Exception:
                 pass
+        # v0.6.0: 联动行为监控——安全事件自动写入BehaviorSession
+        if self._behavior_monitor and self._behavior_monitor.current:
+            self._behavior_monitor.current.record_security_event(entry)
 
     def get_stats(self) -> dict:
         total = len(self._entries)
@@ -201,6 +223,7 @@ class GuardLogger:
 def normalize_text(text: str) -> str:
     """
     归一化文本，去除各种绕过手法：
+    - NFKD Unicode归一化（数学字母/全角/Unicode变体→ASCII）
     - 零宽字符/BOM
     - 全角空格 → 半角
     - 各种标点/特殊符号分隔符
@@ -210,6 +233,9 @@ def normalize_text(text: str) -> str:
     - 英文逐字母空格：j a i l b r e a k → jailbreak
     - 下划线连接英文：ignore_all → ignore all
     """
+    # 0. NFKD Unicode归一化——数学字母(𝕣𝕞→rm)、全角(ｒｍ→rm)等变体→ASCII
+    import unicodedata
+    text = unicodedata.normalize('NFKD', text)
     # 1. 去零宽字符（含BOM/软连字符）
     text = re.sub(r'[\u200b\u200c\u200d\ufeff\u00ad]', '', text)
     # 1.5 v0.5.0 去字面量转义序列（\u200b等6字符形式，常见于复制粘贴/JSON反序列化）
@@ -300,7 +326,11 @@ def normalize_text(text: str) -> str:
 # ============================================================
 
 class EncodingDetector:
-    """v0.5.2: Detect encoding-based bypass attempts (base64, unicode, hex, rot13, leet speak)."""
+    """v0.5.2→v0.6.0: Detect encoding-based bypass attempts.
+
+    v0.5.2: base64, unicode-escape, hex-escape, leet-speak, rot13
+    v0.6.0: + homoglyph, zero-width, crlf, path-traversal, nfkc-normalise, oversized, ssrf
+    """
 
     LEET_MAP = {
         '4': 'a', '@': 'a', '3': 'e', '1': 'i', '!': 'i',
@@ -312,6 +342,103 @@ class EncodingDetector:
         "disable", "restrictions", "constraints", "safety",
         "admin", "root", "sudo", "delete", "destroy",
         "hack", "exploit", "escape", "unrestricted",
+        # v0.6.0: expanded for payment/agent security context
+        "pay", "payment", "execute", "exec", "transfer",
+        "withdraw", "approve", "authorise", "authorize",
+        "confirm", "settle", "send", "credential", "secret",
+        "token", "private_key", "api_key", "password",
+    ]
+
+    # Zero-width characters
+    ZERO_WIDTH_CHARS = {
+        '\u200b': 'ZWSP',    # Zero-width space
+        '\u200c': 'ZWNJ',    # Zero-width non-joiner
+        '\u200d': 'ZWJ',     # Zero-width joiner
+        '\ufeff': 'BOM',     # Byte order mark
+        '\u200e': 'LRM',     # Left-to-right mark
+        '\u200f': 'RLM',     # Right-to-left mark
+        '\u202a': 'LRE',     # Left-to-right embedding
+        '\u202b': 'RLE',     # Right-to-left embedding
+        '\u202c': 'PDF',     # Pop directional formatting
+        '\u202d': 'LRO',     # Left-to-right override
+        '\u202e': 'RLO',     # Right-to-left override
+        '\u2060': 'WJ',      # Word joiner
+        '\u2061': 'FSI',     # First strong isolate
+        '\u2062': 'INI',     # Invisible times
+        '\u2063': 'INV',     # Invisible separator
+        '\u2064': 'INP',     # Invisible plus
+        '\u00ad': 'SHY',     # Soft hyphen
+        '\u034f': 'CGJ',     # Combining grapheme joiner
+    }
+
+    # Cyrillic → Latin homoglyph mapping (most commonly confused)
+    CYRILLIC_HOMOGLYPHS = {
+        '\u0430': 'a',  # а → a
+        '\u0435': 'e',  # е → e
+        '\u043e': 'o',  # о → o
+        '\u0440': 'p',  # р → p
+        '\u0441': 's',  # с → s
+        '\u0443': 'y',  # у → y
+        '\u0445': 'x',  # х → x
+        '\u0410': 'A',  # А → A
+        '\u0412': 'B',  # В → B
+        '\u0415': 'E',  # Е → E
+        '\u041a': 'K',  # К → K
+        '\u041c': 'M',  # М → M
+        '\u041d': 'H',  # Н → H
+        '\u041e': 'O',  # О → O
+        '\u0420': 'P',  # Р → P
+        '\u0421': 'S',  # С → S
+        '\u0422': 'T',  # Т → T
+        '\u0425': 'X',  # Х → X
+    }
+
+    # Greek → Latin homoglyph mapping
+    GREEK_HOMOGLYPHS = {
+        '\u03b1': 'a',  # α → a
+        '\u03b5': 'e',  # ε → e
+        '\u03b9': 'i',  # ι → i
+        '\u03bf': 'o',  # ο → o
+        '\u03c1': 'p',  # ρ → p
+        '\u03c5': 'y',  # υ → y
+        '\u03c7': 'x',  # χ → x
+        '\u0391': 'A',  # Α → A
+        '\u0392': 'B',  # Β → B
+        '\u0395': 'E',  # Ε → E
+        '\u0396': 'Z',  # Ζ → Z
+        '\u0397': 'H',  # Η → H
+        '\u0399': 'I',  # Ι → I
+        '\u039a': 'K',  # Κ → K
+        '\u039c': 'M',  # Μ → M
+        '\u039d': 'N',  # Ν → N
+        '\u039f': 'O',  # Ο → O
+        '\u03a1': 'P',  # Ρ → P
+        '\u03a4': 'T',  # Τ → T
+        '\u03a7': 'X',  # Χ → X
+    }
+
+    # Fullwidth Latin → ASCII (NFKC-normalised equivalents)
+    FULLWIDTH_RANGE = range(0xFF01, 0xFF5F)
+
+    # Private use / suspicious Unicode ranges
+    SUSPICIOUS_RANGES = [
+        (0xE000, 0xF8FF, 'Private_Use_Area'),
+        (0xFFF9, 0xFFFB, 'Interlinear_Annotation'),
+        (0x13430, 0x1343F, 'Egyptian_Hieroglyph_Format'),
+        (0x1BCA0, 0x1BCA3, 'Shorthand_Format'),
+        (0x1D173, 0x1D17A, 'Musical_Symbol_Beamed'),
+    ]
+
+    # SSRF internal IP patterns
+    SSRF_PATTERNS = [
+        r'169\.254\.169\.254',       # AWS/GCP metadata
+        r'10\.\d{1,3}\.\d{1,3}\.\d{1,3}',    # 10.0.0.0/8
+        r'172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}',  # 172.16.0.0/12
+        r'192\.168\.\d{1,3}\.\d{1,3}',        # 192.168.0.0/16
+        r'127\.\d{1,3}\.\d{1,3}\.\d{1,3}',    # loopback
+        r'\[::1\]',                             # IPv6 loopback
+        r'0\.0\.0\.0',                          # any address
+        r'localhost',
     ]
 
     @classmethod
@@ -382,14 +509,234 @@ class EncodingDetector:
             pass
         return findings
 
+    # ============================================================
+    # v0.6.0 NEW DETECTORS
+    # ============================================================
+
+    @classmethod
+    def detect_homoglyph(cls, text: str) -> list:
+        """Detect Cyrillic/Greek characters visually identical to Latin letters.
+        This catches attacks like 'АlgoVoi' (Cyrillic А) or 'раyраl' (Cyrillic р,а)."""
+        findings = []
+        homoglyph_chars = []
+
+        for i, ch in enumerate(text):
+            if ch in cls.CYRILLIC_HOMOGLYPHS:
+                homoglyph_chars.append((i, ch, cls.CYRILLIC_HOMOGLYPHS[ch], 'cyrillic'))
+            elif ch in cls.GREEK_HOMOGLYPHS:
+                homoglyph_chars.append((i, ch, cls.GREEK_HOMOGLYPHS[ch], 'greek'))
+
+        if homoglyph_chars:
+            # Reconstruct the "visual" (Latin-equivalent) string
+            visual = list(text)
+            for i, ch, latin, script in homoglyph_chars:
+                visual[i] = latin
+            visual_str = ''.join(visual).lower()
+
+            # Check if the visual string contains suspicious patterns
+            suspicious_patterns = [
+                'pay', 'payment', 'paypal', 'admin', 'root', 'sudo',
+                'execute', 'exec', 'approve', 'authorise', 'authorize',
+                'transfer', 'withdraw', 'confirm', 'settle', 'send',
+                'ignore', 'bypass', 'override', 'disable', 'safety',
+                'inject', 'hack', 'exploit', 'escape', 'delete',
+                'bank', 'wallet', 'account', 'verify', 'login',
+                'password', 'secret', 'credential', 'token',
+                'algovoi', 'usdc', 'ethereum', 'bitcoin',
+            ]
+            for pat in suspicious_patterns:
+                if pat in visual_str:
+                    findings.append(f"homoglyph->{pat}")
+                    break  # one match is enough
+
+            # Also flag if multiple homoglyphs in a short span (likely deliberate)
+            if len(homoglyph_chars) >= 2:
+                span = homoglyph_chars[-1][0] - homoglyph_chars[0][0]
+                if span <= len(homoglyph_chars) * 3:
+                    findings.append(f"homoglyph_cluster({len(homoglyph_chars)}chars)")
+
+        return findings
+
+    @classmethod
+    def detect_zero_width(cls, text: str) -> list:
+        """Detect zero-width and invisible Unicode characters used to hide content."""
+        findings = []
+        found_chars = set()
+
+        for ch in text:
+            if ch in cls.ZERO_WIDTH_CHARS:
+                found_chars.add(cls.ZERO_WIDTH_CHARS[ch])
+
+        if found_chars:
+            findings.append(f"zero_width->{','.join(sorted(found_chars))}")
+
+        return findings
+
+    @classmethod
+    def detect_crlf(cls, text: str) -> list:
+        """Detect CRLF injection sequences that can inject fake HTTP headers."""
+        findings = []
+        # Literal \r\n in the string
+        if '\r\n' in text:
+            # Check what follows the CRLF
+            parts = text.split('\r\n')
+            for part in parts[1:]:
+                part_stripped = part.strip()
+                if re.match(r'[A-Z][a-zA-Z-]*:', part_stripped):
+                    header_name = part_stripped.split(':')[0]
+                    findings.append(f"crlf_header->{header_name}")
+                elif part_stripped:
+                    findings.append(f"crlf_injection")
+
+        # Also detect escaped CRLF sequences (\r\n as literal backslash-r-n)
+        escaped_crlf = re.findall(r'\\r\\n([A-Z][a-zA-Z-]*:)?', text)
+        if escaped_crlf:
+            for header in escaped_crlf:
+                if header:
+                    findings.append(f"crlf_escaped_header->{header}")
+                else:
+                    findings.append(f"crlf_escaped")
+        # Single \r or \n (LF injection)
+        elif '\n' in text and '\r\n' not in text:
+            findings.append(f"lf_injection")
+        elif '\r' in text and '\r\n' not in text:
+            findings.append(f"cr_injection")
+
+        return findings
+
+    @classmethod
+    def detect_path_traversal(cls, text: str) -> list:
+        """Detect path traversal sequences (../, ..\\, etc.)."""
+        findings = []
+        patterns = [
+            (r'\.\.[/\\]', 'dot_dot_slash'),
+            (r'\.\.\.\.[/\\]', 'double_dot_dot_slash'),
+            (r'%2e%2e[/\\%]', 'url_encoded_traversal'),
+            (r'%2e%2e%2f', 'url_encoded_traversal_full'),
+            (r'\.\.%2f', 'mixed_traversal'),
+            (r'\.\.%5c', 'backslash_traversal_encoded'),
+            (r'/etc/passwd', 'etc_passwd'),
+            (r'/etc/shadow', 'etc_shadow'),
+            (r'\.ssh/', 'ssh_access'),
+            (r'/proc/self/', 'proc_self'),
+            (r'/root/', 'root_access'),
+        ]
+        for pat, name in patterns:
+            if re.search(pat, text, re.IGNORECASE):
+                findings.append(f"traversal->{name}")
+
+        return findings
+
+    @classmethod
+    def detect_nfkc_normalise(cls, text: str) -> list:
+        """Detect NFKC-normalised characters that transform to ASCII keywords.
+        Fullwidth letters (ｐ→p, ａ→a) and compatibility equivalents."""
+        import unicodedata
+
+        findings = []
+        # Check if text has fullwidth or compatibility characters
+        has_nfkc_different = False
+        nfkd_text = unicodedata.normalize('NFKD', text)
+        nfkc_text = unicodedata.normalize('NFKC', text)
+
+        # If NFKC normalisation changes the text, check for suspicious content
+        if nfkc_text != text:
+            nfkc_lower = nfkc_text.lower()
+            suspicious = [
+                'pay', 'ignore', 'bypass', 'override', 'execute', 'exec',
+                'admin', 'root', 'sudo', 'delete', 'destroy', 'inject',
+                'hack', 'exploit', 'escape', 'disable', 'safety',
+                'approve', 'authorise', 'authorize', 'confirm', 'send',
+                'transfer', 'withdraw', 'settle',
+            ]
+            for kw in suspicious:
+                if kw in nfkc_lower and kw not in text.lower():
+                    findings.append(f"nfkc_bypass->{kw}")
+                    break
+
+            # Flag fullwidth character usage
+            fullwidth_count = sum(1 for c in text if ord(c) in cls.FULLWIDTH_RANGE)
+            if fullwidth_count >= 2:
+                findings.append(f"fullwidth_chars({fullwidth_count})")
+
+        return findings
+
+    @classmethod
+    def detect_oversized(cls, text: str) -> list:
+        """Detect abnormally long strings that could be DoS vectors."""
+        findings = []
+        # Overall text length
+        if len(text) > 4096:
+            findings.append(f"oversized_text({len(text)}chars)")
+
+        # Individual field values (JSON string values > 1KB)
+        long_strings = re.findall(r'"[^"]{1024,}"', text)
+        if long_strings:
+            findings.append(f"oversized_field({len(long_strings)}fields)")
+
+        # Repeated character patterns (padding/bomb)
+        repeated = re.findall(r'(.)\1{99,}', text)
+        if repeated:
+            findings.append(f"char_repeat_bomb({repeated[0]})")
+
+        # Null byte sequences
+        null_count = text.count('\x00')
+        if null_count > 10:
+            findings.append(f"null_byte_flood({null_count})")
+
+        return findings
+
+    @classmethod
+    def detect_ssrf(cls, text: str) -> list:
+        """Detect SSRF (Server-Side Request Forgery) URLs pointing to internal resources."""
+        findings = []
+
+        # Extract URLs from text
+        urls = re.findall(r'https?://[^\s"\'<>]+', text, re.IGNORECASE)
+        for url in urls:
+            for pattern in cls.SSRF_PATTERNS:
+                if re.search(pattern, url):
+                    findings.append(f"ssrf_internal->{url[:80]}")
+                    break
+
+        # Also check for URL-encoded internal IPs
+        encoded_ssrf = re.findall(r'%31%36%39|%31%30%2e|%31%37%32%2e|%31%39%32', text, re.IGNORECASE)
+        if encoded_ssrf:
+            findings.append(f"ssrf_encoded_ip")
+
+        return findings
+
+    @classmethod
+    def detect_suspicious_unicode(cls, text: str) -> list:
+        """Detect characters from suspicious Unicode ranges (private use, etc.)."""
+        findings = []
+        for start, end, name in cls.SUSPICIOUS_RANGES:
+            for ch in text:
+                cp = ord(ch)
+                if start <= cp <= end:
+                    findings.append(f"suspicious_unicode->{name}")
+                    break
+
+        return findings
+
     @classmethod
     def detect_all(cls, text: str) -> list:
         findings = []
+        # v0.5.2 original detectors
         findings.extend(cls.detect_base64(text))
         findings.extend(cls.detect_unicode_escape(text))
         findings.extend(cls.detect_hex_escape(text))
         findings.extend(cls.detect_leet_speak(text))
         findings.extend(cls.detect_rot13(text))
+        # v0.6.0 new detectors
+        findings.extend(cls.detect_homoglyph(text))
+        findings.extend(cls.detect_zero_width(text))
+        findings.extend(cls.detect_crlf(text))
+        findings.extend(cls.detect_path_traversal(text))
+        findings.extend(cls.detect_nfkc_normalise(text))
+        findings.extend(cls.detect_oversized(text))
+        findings.extend(cls.detect_ssrf(text))
+        findings.extend(cls.detect_suspicious_unicode(text))
         return findings
 
 
@@ -1220,7 +1567,7 @@ class TerritoryRouter:
 class SecurityEngine:
     """核心安全检查：白名单 → 元边界 → 明确攻击 → 灰色地带 → 组合攻击"""
 
-    def __init__(self, mode: GuardMode, whitelist: list[str] = None):
+    def __init__(self, mode: GuardMode, whitelist: List[str] = None):
         self.mode = mode
         self.whitelist = whitelist or DEFAULT_WHITELIST
 
@@ -1403,6 +1750,10 @@ class VSOSGuard:
         self._on_block = on_block
         self._on_warn = on_warn
         self._enable_encoding_detection = enable_encoding_detection
+        # v0.6.0: 行为监控+算力统计
+        self.behavior = BehaviorMonitor()
+        # v0.6.0: GuardLogger联动BehaviorMonitor（安全事件自动写入BehaviorSession）
+        self.logger._behavior_monitor = self.behavior
 
     def check(self, input_text: str) -> CheckResult:
         """
@@ -1531,27 +1882,80 @@ class VSOSGuard:
                         except Exception: pass
                     return gray_result
 
-        # v0.5.2: encoding detected but no other rule triggered -> warning
+        # v0.6.0: structural encoding attacks -> block; keyword-only findings -> warn
         if encoding_findings:
-            result = CheckResult(
-                safe=True,
-                confidence="warning",
-                warning=f"Encoding bypass detected: {', '.join(encoding_findings)}",
-                risk_level="low",
-                matched_pattern=", ".join(encoding_findings),
+            structural_tags = {
+                "homoglyph", "zero_width", "crlf", "traversal",
+                "nfkc_bypass", "oversized", "ssrf", "suspicious_unicode",
+            }
+            is_structural = any(
+                any(tag in finding.lower() for tag in structural_tags)
+                for finding in encoding_findings
             )
-            result.normalized_input = normalize_text(input_text)[:200]
-            self.logger.log_check(input_text, result)
-            if self._on_warn:
-                try: self._on_warn(result.to_dict())
-                except Exception: pass
-            return result
+            if is_structural:
+                result = CheckResult(
+                    safe=False,
+                    confidence="critical",
+                    reason=f"Structural encoding attack blocked: {', '.join(encoding_findings)}",
+                    risk_level="critical",
+                    matched_pattern=", ".join(encoding_findings),
+                )
+                result.normalized_input = normalize_text(input_text)[:200]
+                self.logger.log_check(input_text, result)
+                if self._on_block:
+                    try: self._on_block(result.to_dict())
+                    except Exception: pass
+                return result
+            else:
+                result = CheckResult(
+                    safe=True,
+                    confidence="warning",
+                    warning=f"Encoding bypass detected: {', '.join(encoding_findings)}",
+                    risk_level="low",
+                    matched_pattern=", ".join(encoding_findings),
+                )
+                result.normalized_input = normalize_text(input_text)[:200]
+                self.logger.log_check(input_text, result)
+                if self._on_warn:
+                    try: self._on_warn(result.to_dict())
+                    except Exception: pass
+                return result
 
         # Safe pass
         result = CheckResult(safe=True, confidence="safe")
         result.normalized_input = normalize_text(input_text)[:200]
         self.logger.log_check(input_text, result)
+
+        # v0.6.0: 安全事件已在GuardLogger.log_check联动中记录
         return result
+
+    # ============================================================
+    # v0.6.0: 行为监控便捷方法
+    # ============================================================
+
+    def start_session(self, task_name: str = "") -> 'BehaviorSession':
+        """开始行为监控会话"""
+        return self.behavior.start_session(task_name)
+
+    def finish_session(self) -> Optional['BehaviorSession']:
+        """结束当前会话，返回工作总统计"""
+        return self.behavior.finish_session()
+
+    def session_summary(self) -> str:
+        """当前会话的工作总统计（只总结不解读）"""
+        if self.behavior.current:
+            return self.behavior.current.summary()
+        return "无活跃会话"
+
+    def session_report(self) -> str:
+        """当前会话的完整JSON数据（给前端浮窗用）"""
+        if self.behavior.current:
+            return self.behavior.current.to_json()
+        return "{}"
+
+    def today_stats(self) -> dict:
+        """今日总统计"""
+        return self.behavior.get_today_stats()
 
     def _check_attack_signals(self, input_text: str) -> bool:
         """

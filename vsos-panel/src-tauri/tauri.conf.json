@@ -1,0 +1,29 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nickelc/tauri-v2-schema/main/schema.json",
+  "productName": "VSOS Guard",
+  "version": "0.6.0",
+  "identifier": "com.vsos.guard",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "VSOS Guard",
+        "width": 320,
+        "height": 580,
+        "resizable": false,
+        "alwaysOnTop": true,
+        "decorations": false,
+        "transparent": true,
+        "skipTaskbar": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

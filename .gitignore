@@ -8,6 +8,10 @@ dist/
 build/
 *.egg
 
+# Distribution (never commit built packages)
+*.whl
+*.tar.gz
+
 # Virtual env
 venv/
 .venv/
