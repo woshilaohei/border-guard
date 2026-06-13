@@ -1,4 +1,4 @@
-# VSOS — Vector Sovereign Operating System
+# Border Guard — Territory Sovereignty Security System
 
 > An AI security operating system that eats attacks for breakfast and gets stronger every time.
 
@@ -592,7 +592,7 @@ print(f"Variable complexity: {fission_result.variable_analysis.variable_complexi
 
 - 📧 Email: **1410770089@qq.com**
 - 🐙 GitHub: [github.com/woshilaohei](https://github.com/woshilaohei)
-- 💬 Open an Issue: [vsos-guard/issues](https://github.com/woshilaohei/vsos-guard/issues)
+- 💬 Open an Issue: [border-guard/issues](https://github.com/woshilaohei/border-guard/issues)
 
 > No formalities. Security researcher, ML engineer, or just passing by and found this interesting — come say hi.
 
